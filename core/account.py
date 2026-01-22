@@ -6,8 +6,9 @@ import asyncio
 import json
 import logging
 import os
-import time
 import random
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, TYPE_CHECKING
@@ -193,7 +194,9 @@ class MultiAccountManager:
         self.account_list: List[str] = []  # 账户ID列表 (用于轮询)
         self.current_index = 0
         self._cache_lock = asyncio.Lock()  # 缓存操作专用锁
-        self._index_lock = asyncio.Lock()  # 索引更新专用锁
+        self._counter_lock = threading.Lock()  # 轮询计数器锁
+        self._request_counter = 0  # 请求计数器
+        self._last_account_count = 0  # 可用账户数量
         # 全局会话缓存：{conv_key: {"account_id": str, "session_id": str, "updated_at": float}}
         self.global_session_cache: Dict[str, dict] = {}
         self.cache_max_size = 1000  # 最大缓存条目数
@@ -291,10 +294,10 @@ class MultiAccountManager:
         logger.info(f"[MULTI] [ACCOUNT] 添加账户: {config.account_id}")
 
     async def get_account(self, account_id: Optional[str] = None, request_id: str = "") -> AccountManager:
-        """获取账户 - 加权随机轮询，并发安全且均衡分配"""
+        """获取账户 - Round-Robin轮询"""
         req_tag = f"[req_{request_id}] " if request_id else ""
 
-        # 如果指定了账户ID（无需锁）
+        # 指定账户ID时直接返回
         if account_id:
             if account_id not in self.accounts:
                 raise HTTPException(404, f"Account {account_id} not found")
@@ -303,39 +306,30 @@ class MultiAccountManager:
                 raise HTTPException(503, f"Account {account_id} temporarily unavailable")
             return account
 
-        # 筛选所有可用账户并计算权重
-        weighted_accounts = []
-        for acc_id in self.account_list:
-            account = self.accounts[acc_id]
-            # 检查账户是否可用（会自动恢复429冷却期后的账户）
-            if (account.should_retry() and
-                not account.config.is_expired() and
-                not account.config.disabled):
+        # 筛选可用账户
+        available_accounts = [
+            acc for acc in self.accounts.values()
+            if (acc.should_retry() and
+                not acc.config.is_expired() and
+                not acc.config.disabled)
+        ]
 
-                # 计算权重：使用越少权重越高（避免除零）
-                usage_weight = 1.0 / (account.session_usage_count + 1)
-
-                # 健康度因子：无错误=1.0，有错误=0.5（降低不健康账户被选中概率）
-                health_factor = 1.0 if account.error_count == 0 else 0.5
-
-                # 综合权重
-                weight = usage_weight * health_factor
-                weighted_accounts.append((account, weight))
-
-        if not weighted_accounts:
+        if not available_accounts:
             raise HTTPException(503, "No available accounts")
 
-        # 加权随机选择（并发请求自然分散，无需加锁）
-        accounts = [acc for acc, _ in weighted_accounts]
-        weights = [w for _, w in weighted_accounts]
-        selected = random.choices(accounts, weights=weights, k=1)[0]
+        # 轮询选择
+        with self._counter_lock:
+            if len(available_accounts) != self._last_account_count:
+                self._request_counter = random.randint(0, 999999)
+                self._last_account_count = len(available_accounts)
+            index = self._request_counter % len(available_accounts)
+            self._request_counter += 1
 
-        # 增加使用计数（允许少量竞争条件，统计上可忽略）
+        selected = available_accounts[index]
         selected.session_usage_count += 1
 
         logger.info(f"[MULTI] [ACCOUNT] {req_tag}选择账户: {selected.config.account_id} "
-                    f"(本次使用: {selected.session_usage_count}, 错误数: {selected.error_count}, "
-                    f"可用账户数: {len(weighted_accounts)})")
+                    f"(索引: {index}/{len(available_accounts)}, 使用: {selected.session_usage_count})")
         return selected
 
 
