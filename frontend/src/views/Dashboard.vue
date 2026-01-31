@@ -52,6 +52,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { statsApi } from '@/api'
 import HelpTip from '@/components/ui/HelpTip.vue'
+import {
+  getLineChartTheme,
+  getPieChartTheme,
+  createLineSeries,
+  createPieDataItem,
+  chartColors,
+  getModelColor,
+} from '@/lib/chartTheme'
 
 type ChartInstance = {
   setOption: (option: unknown) => void
@@ -153,59 +161,23 @@ function initModelChart() {
 function updateTrendChart() {
   if (!trendChart) return
 
-  const successColor = '#0ea5e9'
-  const failureColor = '#f59e0b'
-  const failureLineColor = '#ef4444'
+  const theme = getLineChartTheme()
 
   trendChart.setOption({
-    tooltip: { trigger: 'axis' },
-    legend: {
-      data: ['成功(总请求)', '失败/限流'],
-      right: 0,
-      top: 0,
-      textStyle: { color: '#6b6b6b', fontSize: 11 },
-    },
-    grid: { left: 24, right: 16, top: 44, bottom: 24, containLabel: true },
+    ...theme,
     xAxis: {
-      type: 'category',
+      ...theme.xAxis,
       data: trendLabels.value,
-      boundaryGap: false,
-      axisLine: { lineStyle: { color: '#d4d4d4' } },
-      axisTick: { show: false },
-      axisLabel: { color: '#6b6b6b', fontSize: 10 },
-    },
-    yAxis: {
-      type: 'value',
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: '#6b6b6b', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#e5e5e5' } },
     },
     series: [
-      {
-        name: '成功(总请求)',
-        type: 'line',
-        data: trendSuccessData.value,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 2 },
-        areaStyle: { opacity: 0.25 },
-        itemStyle: { color: successColor },
-        emphasis: { disabled: true },
-        z: 1,
-      },
-      {
-        name: '失败/限流',
-        type: 'line',
-        data: trendFailureData.value,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 2 },
-        areaStyle: { opacity: 0.4 },
-        itemStyle: { color: failureLineColor },
-        emphasis: { disabled: true },
-        z: 2,
-      },
+      createLineSeries('成功(总请求)', trendSuccessData.value, chartColors.primary, {
+        areaOpacity: 0.25,
+        zIndex: 1,
+      }),
+      createLineSeries('失败/限流', trendFailureData.value, chartColors.danger, {
+        areaOpacity: 0.4,
+        zIndex: 2,
+      }),
     ],
   })
   scheduleTrendResize()
@@ -214,59 +186,33 @@ function updateTrendChart() {
 function updateModelChart() {
   if (!modelChart) return
 
+  const isMobile = window.innerWidth < 768
+  const theme = getPieChartTheme(isMobile)
+
   const modelTotals = Object.entries(trendModelRequests.value)
-    .map(([model, data]) => ({
-      name: model,
-      value: data.reduce((sum, item) => sum + item, 0),
-      itemStyle: { color: getModelColor(model), borderRadius: 8 },
-    }))
+    .map(([model, data]) =>
+      createPieDataItem(
+        model,
+        data.reduce((sum, item) => sum + item, 0),
+        getModelColor(model)
+      )
+    )
     .filter(item => item.value > 0)
 
-  // 响应式布局：手机端标签在底部，桌面端标签在左侧
-  const isMobile = window.innerWidth < 768
-  const legendConfig = isMobile
-    ? {
-        data: modelTotals.map(item => item.name),
-        left: 'center',
-        bottom: 0,
-        orient: 'horizontal' as const,
-        textStyle: { color: '#6b6b6b', fontSize: 11 },
-      }
-    : {
-        data: modelTotals.map(item => item.name),
-        left: 0,
-        top: 'center',
-        orient: 'vertical' as const,
-        textStyle: { color: '#6b6b6b', fontSize: 11 },
-      }
-
-  const pieCenter = isMobile ? ['50%', '38%'] : ['66%', '50%']
-  const pieRadius = isMobile ? ['40%', '62%'] : ['52%', '78%']
-
   modelChart.setOption({
-    animation: true,
-    animationDuration: 600,
-    animationEasing: 'cubicOut',
-    animationDurationUpdate: 300,
-    animationEasingUpdate: 'cubicOut',
+    ...theme,
     tooltip: {
-      trigger: 'item',
+      ...theme.tooltip,
       formatter: (params: { name: string; value: number; percent: number }) =>
         `${params.name}: ${params.value} 次 (${params.percent}%)`,
     },
-    legend: legendConfig,
+    legend: {
+      ...theme.legend,
+      data: modelTotals.map(item => item.name),
+    },
     series: [
       {
-        type: 'pie',
-        radius: pieRadius,
-        center: pieCenter,
-        startAngle: 90,
-        animationType: 'scale',
-        animationEasing: 'cubicOut',
-        avoidLabelOverlap: true,
-        label: { show: true, formatter: '{b}', fontSize: 11, color: '#6b6b6b' },
-        labelLine: { length: 12, length2: 10 },
-        itemStyle: { borderWidth: 2, borderColor: '#fff', borderRadius: 10 },
+        ...theme.series,
         data: modelTotals,
       },
     ],
@@ -321,16 +267,5 @@ function scheduleModelResize() {
   requestAnimationFrame(() => {
     modelChart?.resize()
   })
-}
-
-function getModelColor(model: string) {
-  const modelColors: Record<string, string> = {
-    'gemini-3-pro-preview': '#0ea5e9',
-    'gemini-2.5-pro': '#22c55e',
-    'gemini-2.5-flash': '#f59e0b',
-    'gemini-3-flash-preview': '#ec4899',
-    'gemini-auto': '#64748b',
-  }
-  return modelColors[model] || '#94a3b8'
 }
 </script>
