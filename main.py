@@ -2023,12 +2023,6 @@ async def chat_impl(
                         else:
                             account_manager.handle_non_http_error("创建会话", request_id, quota_type)
 
-                        # 保存冷却状态到数据库
-                        try:
-                            await account.save_account_cooldown_state(account_manager.config.account_id, account_manager)
-                        except Exception as save_err:
-                            logger.warning(f"[COOLDOWN] 保存冷却状态失败: {save_err}")
-
                     if retry_idx == max_retries - 1:
                         logger.error(f"[CHAT] [req_{request_id}] 所有账户均不可用")
                         status = classify_error_status(503, last_error if isinstance(last_error, Exception) else Exception("account_pool_unavailable"))
@@ -2168,12 +2162,6 @@ async def chat_impl(
                     account_manager.handle_http_error(status_code, str(e.detail) if hasattr(e, 'detail') else "", request_id, quota_type)
                 else:
                     account_manager.handle_non_http_error("聊天请求", request_id, quota_type)
-
-                # 保存冷却状态到数据库
-                try:
-                    await account.save_account_cooldown_state(account_manager.config.account_id, account_manager)
-                except Exception as save_err:
-                    logger.warning(f"[COOLDOWN] 保存冷却状态失败: {save_err}")
 
                 # 检查是否还能继续重试
                 if retry_idx < max_retries - 1:

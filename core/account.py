@@ -1030,48 +1030,27 @@ def bulk_delete_accounts(
 
 
 async def save_account_cooldown_state(account_id: str, account_mgr: AccountManager) -> bool:
-    """保存单个账户的冷却状态到数据库"""
+    """保存单个账户的冷却状态到数据库（优化版：单条更新）"""
     if not storage.is_database_enabled():
         return False
 
     try:
-        # 加载所有账户数据
-        accounts_data = await storage.load_accounts()
-        if not accounts_data:
-            logger.warning(f"[COOLDOWN] 无法加载账户数据")
-            return False
+        cooldown_data = {
+            "quota_cooldowns": dict(account_mgr.quota_cooldowns),
+            "generic_cooldown_until": account_mgr.generic_cooldown_until,
+            "permanently_disabled": account_mgr.permanently_disabled,
+            "conversation_count": account_mgr.conversation_count,
+            "failure_count": account_mgr.failure_count,
+        }
 
-        # 查找并更新目标账户
-        found = False
-        for i, acc in enumerate(accounts_data, 1):
-            # 使用与 load_multi_account_config 相同的逻辑获取 account_id
-            acc_id = get_account_id(acc, i)
-            if acc_id == account_id:
-                # 更新冷却状态字段
-                acc["quota_cooldowns"] = dict(account_mgr.quota_cooldowns)
-                acc["generic_cooldown_until"] = account_mgr.generic_cooldown_until
-                acc["permanently_disabled"] = account_mgr.permanently_disabled
-                acc["conversation_count"] = account_mgr.conversation_count
-                acc["failure_count"] = account_mgr.failure_count
-                found = True
-                logger.debug(f"[COOLDOWN] 找到账户 {account_id}，准备保存")
-                break
-
-        if not found:
-            logger.warning(f"[COOLDOWN] 账户 {account_id} 不存在，共有 {len(accounts_data)} 个账户")
-            return False
-
-        # 保存所有账户数据
-        success = await storage.save_accounts(accounts_data)
+        success = await storage.update_account_cooldown(account_id, cooldown_data)
         if success:
             logger.debug(f"[COOLDOWN] 账户 {account_id} 冷却状态已保存")
         else:
-            logger.warning(f"[COOLDOWN] 保存账户 {account_id} 失败")
+            logger.warning(f"[COOLDOWN] 账户 {account_id} 不存在")
         return success
     except Exception as e:
         logger.error(f"[COOLDOWN] 保存账户 {account_id} 冷却状态失败: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 
@@ -1085,15 +1064,40 @@ def save_account_cooldown_state_sync(account_id: str, account_mgr: AccountManage
 
 
 async def save_all_cooldown_states(multi_account_mgr: MultiAccountManager) -> int:
-    """保存所有账户的冷却状态到数据库"""
+    """保存有冷却状态的账户到数据库（优化版：批量更新）"""
     if not storage.is_database_enabled():
         return 0
 
-    success_count = 0
+    # 收集需要保存的账户
+    updates = []
     for account_id, account_mgr in multi_account_mgr.accounts.items():
-        if await save_account_cooldown_state(account_id, account_mgr):
-            success_count += 1
+        has_cooldown = (
+            account_mgr.quota_cooldowns or
+            account_mgr.generic_cooldown_until > 0 or
+            account_mgr.permanently_disabled or
+            account_mgr.conversation_count > 0 or
+            account_mgr.failure_count > 0
+        )
 
-    logger.info(f"[COOLDOWN] 批量保存冷却状态: {success_count}/{len(multi_account_mgr.accounts)} 个账户")
+        if has_cooldown:
+            cooldown_data = {
+                "quota_cooldowns": dict(account_mgr.quota_cooldowns),
+                "generic_cooldown_until": account_mgr.generic_cooldown_until,
+                "permanently_disabled": account_mgr.permanently_disabled,
+                "conversation_count": account_mgr.conversation_count,
+                "failure_count": account_mgr.failure_count,
+            }
+            updates.append((account_id, cooldown_data))
+
+    if not updates:
+        logger.info(f"[COOLDOWN] 无需保存：所有账户无冷却状态")
+        return 0
+
+    success_count, missing = await storage.bulk_update_accounts_cooldown(updates)
+
+    if missing:
+        logger.warning(f"[COOLDOWN] {len(missing)} 个账户不存在: {missing[:5]}")
+
+    logger.info(f"[COOLDOWN] 批量保存冷却状态: {success_count}/{len(updates)} 个账户（跳过 {len(multi_account_mgr.accounts) - len(updates)} 个无状态账户）")
     return success_count
 
